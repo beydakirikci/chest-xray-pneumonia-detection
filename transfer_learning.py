@@ -1,0 +1,138 @@
+"""
+zature siniflandirmasi icin transfer learning uygulamasi
+zatur:https://www.kaggle.com/datasets/paultimothymooney/chest-xray-pneumonia
+
+transfer learning model:densenet121
+
+"""
+
+#import libraries
+from tensorflow.keras.preprocessing.image import ImageDataGenerator #goruntu verisi yukleme ve data augmentation
+from tensorflow.keras.applications import DenseNet121 #onceden egitilmis model
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Dropout #model katmanlari
+from tensorflow.keras.models import Model #model olusturma
+from tensorflow.keras.optimizers import Adam #optimizer
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau #callbacklar
+
+import matplotlib.pyplot as plt #goruntu gosterme
+import numpy as np #sayisal islemler icin
+import os #dosya islemleri icin 
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay #karisiklik matrisi ve gorsellestirme
+
+#load data
+
+DATA_DIR = "chest_xray" #veri seti dizini 
+IMG_SIZE = (224, 224) #modelin bekledigi input boyutu
+BATCH_SIZE = 64
+CLASS_MODE = "binary" #ikili siniflandirma
+
+# Data Augmentation (Eğitim seti için parametreler eklendi)
+train_datagen = ImageDataGenerator(
+    rescale = 1/255.0, #normalization 0-1 arasina getirme  
+    horizontal_flip = True, #yatayda cevirme 
+    rotation_range = 10, #+- 10 derece dondurme
+    brightness_range = [0.8, 1.2], #parlaklik ayari
+    validation_split = 0.1 #validation icin %10 ayirma 
+)
+
+test_datagen = ImageDataGenerator(rescale = 1/255.0) #test icin sadece normalization
+
+# Train Generator
+train_gen = train_datagen.flow_from_directory(
+    os.path.join(DATA_DIR, "train"),
+    target_size = IMG_SIZE,
+    batch_size = BATCH_SIZE,
+    class_mode = CLASS_MODE,
+    subset = "training", #egitim verisi
+    shuffle = True,
+)
+
+# Validation Generator
+val_gen = train_datagen.flow_from_directory(
+    os.path.join(DATA_DIR, "train"),
+    target_size = IMG_SIZE,
+    batch_size = BATCH_SIZE,
+    class_mode = CLASS_MODE,
+    subset = "validation", #validation verisi
+    shuffle = False,
+)
+
+# Test Generator
+test_gen = test_datagen.flow_from_directory(
+    os.path.join(DATA_DIR, "test"),
+    target_size = IMG_SIZE,
+    batch_size = BATCH_SIZE,
+    class_mode = CLASS_MODE,
+    shuffle = False,
+)
+
+# Basic Visualization
+class_name = list(train_gen.class_indices.keys()) # sinif isimleri [normal, pneumonia vb.]
+images, labels = next(train_gen) # bir batch veri al
+
+plt.figure(figsize=(10, 4))
+for i in range(4):
+    ax = plt.subplot(1, 4, i+1)
+    ax.imshow(images[i])
+    ax.set_title(class_name[int(labels[i])])
+    ax.axis("off")
+plt.tight_layout()
+plt.show()    
+
+
+# Transfer learning modelin tanimlanmasi: DenseNet121
+base_model = DenseNet121(
+    weights = "imagenet", # onceden egitilmis modelin agirliklari
+    include_top = False, # son katmanlari dahil etme
+    input_shape = (*IMG_SIZE, 3) # 3 kanal (RGB)
+)
+
+base_model.trainable = False  # 1. Base modeli donduruyoruz
+x = base_model.output         # 2. Base modelin çıktısını x'e aktarıyoruz
+
+x = GlobalAveragePooling2D()(x)
+x = Dense(128, activation="relu")(x) # 128 nöronlu gizli katman
+x = Dropout(0.5)(x)
+pred = Dense(1, activation="sigmoid")(x) # 1 nöronlu çıktı katmanı (ikili sınıflandırma)
+
+model = Model(inputs=base_model.input, outputs=pred) # Modeli tanımla
+
+# Modelin derlenmesi ve callback ayarlari
+model.compile(
+    optimizer = Adam(learning_rate = 1e-4),
+    loss = "binary_crossentropy",
+    metrics = ["accuracy"]
+)
+
+callbacks = [
+    EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True),
+    ReduceLROnPlateau(monitor="val_loss", factor=0.2, patience=2, min_lr=1e-6),
+    ModelCheckpoint("best_model.h5", monitor="val_loss", save_best_only=True)
+]
+
+print("Model Summary:")
+print(model.summary()) # model ozeti
+
+
+# Modelin egitilmesi ve sonuclarin degerlendirilmesi
+history = model.fit(
+    train_gen,
+    validation_data = val_gen,
+    epochs = 2,
+    callbacks = callbacks,
+    verbose = 1 # egitim ilerlemesini goster
+)
+
+pred_probs = model.predict(test_gen, verbose=1)
+pred_labels = (pred_probs > 0.5).astype(int).ravel() # olasiliklardan etiket uretme
+true_labels = test_gen.classes # gercek etiket verilerimiz
+
+cm = confusion_matrix(true_labels, pred_labels)
+# DÜZELTME: class_name değişkeni kullanıldı
+disp = ConfusionMatrixDisplay(cm, display_labels=class_name)
+
+# DÜZELTME: plt.figure eksikliği giderildi
+plt.figure(figsize=(8, 8))
+disp.plot(cmap="Blues", colorbar=False)
+plt.title("Test Seti Confusion Matrix")
+plt.show()
